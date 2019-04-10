@@ -9,14 +9,18 @@ output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
 library(readr)
 library(tidyverse)
 library(lubridate)
+library(knitr)
 ```
 
-## R Markdown
-```{r, message=FALSE, warning=FALSE}
+## Exploratory Data Analysis
+The main purpose of this project is to quantify performance levels of professional tennis players. Currently, the rankings of players are determined by the amount of points they earned. Different levels of tournaments award different amount of points. For example, an ATP 500 series gives the champion 500 points, a Masters 1000 tournament gives the champion 1000 points, while each Grand Slam (the highest tournament level) awards the champion 2000 points.
+
+The main goal of this project is to reliably estimate the true performance level of a player, which should be a more accurate metric for a player's ability than points or ranking. However, since performance levels are not directly observable, we cannot make EDA plots on them. Alternatively, we would make exploratory plots on points and win percentage and illustrate why they might not be suitable for reliably inferring a player's performance. In particular, we would focus on the four dominant players in the past 10 years, the so-called "Big 4" of men's professional tennis, namely *Roger Federer, Rafael Nadal, Novak Djokovic* and *Andy Murray*. Below we show the points and win percentage of these four players across the years.
+```{r}
 Tennis = read_csv("Data.csv")
 
 Tennis_df = Tennis %>%
@@ -43,102 +47,53 @@ Tennis_df = Tennis %>%
   select(-LRank_temp, -WPts_temp)
 ```
 
-```{r}
-perm_year = Tennis_df %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = as.numeric(ifelse(WL == "Winner", WPts, LPts)),
-         logPts = log(Pts),
-         Rank = as.numeric(ifelse(WL == "Winner", WRank, LRank)),
-         WL = ifelse(WL == "Winner", 1, 0)) %>%
-  select(Series, Pts, Rank, WL) %>%
-  group_by(Series) %>%
-  summarise(Pts = mean(Pts, na.rm = T),
-            Rank = mean(Rank, na.rm = T))
-perm_year
-```
-
 ```{r, message=FALSE, warning=FALSE}
-perm_year = Tennis_df %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = as.numeric(ifelse(WL == "Winner", WPts, LPts)),
-         logPts = log(Pts),
-         Rank = as.numeric(ifelse(WL == "Winner", WRank, LRank)),
-         WL = ifelse(WL == "Winner", 1, 0)) %>%
-  select(Pts, logPts, Rank, WL)
-cor(perm_year, use = "complete.obs")
-```
-
-```{r}
-thresh = 100
-player_names = which(c(Tennis_df$Winner, Tennis_df$Loser) %>% table() < thresh) %>% names()
-Tennis_df = Tennis_df %>%
-  mutate(Winner = Winner %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}),
-         Loser  = Loser  %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}))
-```
-
-
-```{r, message=FALSE, warning=FALSE}
-name = c("Federer R.", "Nadal R.", "Djokovic N.", "Ferrer D.", "Roddick A.", "Murray A.", "Berdych T.", "Robredo T.", "Hewitt L.", "Davydenko N.", "Youzhny M.", "Verdasco F.", "Ferrero J.C.", "Gasquet R.")
-player_name = name[c(1:3, 6)]
+player_name = c("Federer R.", "Nadal R.", "Djokovic N.", "Murray A.")
 perm_year = Tennis_df %>% filter(Winner %in% player_name | Loser %in% player_name) %>% 
   gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = ifelse(WL == "Winner", WPts, LPts), 
+  mutate(Points = ifelse(WL == "Winner", WPts, LPts), 
          Year = as.numeric(Year)) %>%
   filter(Player %in% player_name) %>%
   group_by(Year, Player) %>%
-  select(WL, Pts) %>%
+  select(WL, Points) %>%
   summarise(Win = length(which(WL == "Winner")) / length(WL), 
-            Pts = mean(as.numeric(Pts), na.rm = T))
-cor(perm_year[, 3:4], use = "complete.obs")
+            Points = mean(as.numeric(Points), na.rm = T))
 
-perm_year_plot = perm_year %>% gather(key = "key", value = "value", Win, Pts) %>%
+perm_year_plot = perm_year %>% gather(key = "key", value = "value", Win, Points) %>%
   mutate(Player = factor(Player))
+perm_year_plot$Player = factor(perm_year_plot$Player, levels = c("Federer R.", "Nadal R.", "Djokovic N.","Murray A."))
 ggplot(perm_year_plot, aes(x = Year, y = value, color = Player))+
   geom_line(size = 1.5)+
   facet_grid(key~., scales = "free_y")+
   theme_bw()+
   labs(title = "Average points and win percentage of the Big 4")
 ```
+It's clear that points and win percentage, while positively correlated, are not necessarily consistent with one another. Since the amount of points a player gains heavily depends on outcomes of certain matches (Grand slam matches in particular), differences in points may be the result of random variations. Win percentage also has the problem of not taking the performance levels of opponents into account. Obviously, winning against a tougher opponent is less likely than winning over a weaker opponents, but both points and win percentage are unable to reflect this.
 
-```{r, message=FALSE, warning=FALSE}
-player_name = name[c(1:3, 6)]
-perm_year = Tennis_df %>% filter(Winner %in% player_name & Loser %in% player_name) %>% 
+To round up our exploratory analysis, we will take a look at some aspects of our data. First, we show the proportion of each court and surface that appears in the dataset.
+```{r}
+court_surf = Tennis_df %>% 
   gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = ifelse(WL == "Winner", WPts, LPts), 
-         Year = as.numeric(Year)) %>%
-  group_by(Year, Player) %>%
-  select(WL, Pts) %>%
-  summarise(Win = length(which(WL == "Winner")) / length(WL), 
-            Pts = mean(as.numeric(Pts), na.rm = T),
-            n = n())
-cor(perm_year[, 3:4], use = "complete.obs")
-
-perm_year_plot = perm_year %>% gather(key = "key", value = "value", Win, Pts) %>%
-  mutate(Player = factor(Player))
-ggplot(perm_year_plot, aes(x = Year, y = value, color = Player))+
-  geom_line(size = 1.5)+
-  facet_grid(key~., scales = "free_y")+
-  theme_bw()+
-  labs(title = "Average points and win percentage(against each other) of the Big 4")
+  select(Court, Surface) %>%
+  group_by(Court, Surface) %>%
+  summarise(Prop = n() / (2 * nrow(Tennis_df)))
+kable(court_surf, caption = "Proportion of Matches for each Court-Surface combinations", digits = 3)
+Tennis_df = Tennis_df %>%
+  filter(Surface != "Carpet")
 ```
 
-```{r, message=FALSE, warning=FALSE}
-name = c("Federer R.", "Nadal R.", "Djokovic N.", "Ferrer D.", "Roddick A.", "Murray A.", "Berdych T.", "Robredo T.", "Hewitt L.", "Davydenko N.", "Youzhny M.", "Verdasco F.", "Ferrero J.C.", "Gasquet R.")
-player_name = name[c(1:3, 6)]
-perm_year = Tennis_df %>% filter(Winner %in% player_name | Loser %in% player_name) %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Year = as.numeric(Year)) %>%
-  filter(Player %in% player_name) %>%
-  group_by(Year, Player, Series) %>%
-  select(WL) %>%
-  summarise(Win = length(which(WL == "Winner")) / length(WL))
+The proportion of different combinations is clearly imbalanced. From the table, we notice that only a small fraction of matches are played on carpets. This is because this type of surface was removed from professional men's tennis tournament in 2009. One would also notice that the majority of indoor matches are essentially hard court matches, as there are only a handful of indoor clay court matches and no indoor grass court match. As a result, matches played on carpet would not be used and indoor/outdoor would not be included as a variable in this project.
 
-ggplot(perm_year, aes(x = Year, y = Win, color = factor(Series)))+
-  geom_line(size = 1.5)+
-  facet_grid(Player~.)+
-  theme_bw()+
-  labs(title = "Win percentage of the Big 4 for different series")
+Addtionally, since we want to estimate individual player specific coefficients, we have to deal with the issue of some players having played too few matches. To resolve this issue, we would group all players who have not played 300 or more matches as a seperate group: "Other".
+```{r}
+thresh = 300
+player_names = which(c(Tennis_df$Winner, Tennis_df$Loser) %>% table() < thresh) %>% names()
+Tennis_df = Tennis_df %>%
+  mutate(Winner = Winner %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}),
+         Loser  = Loser  %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}))
 ```
+
+$\\\\\\\\$
 
 # Model
 The graphical model this project uses can be expressed using the graph below.
@@ -227,5 +182,3 @@ p(\Sigma \mid \beta_{1:M}, \mu) &= \text{inverse-Wishart}(\eta_0 + M, (S_0+\sum_
 p(\sigma^2_j \mid \beta_j, X_j) &= \text{inverse-gamma}((\nu_0 + n_j)/2, [\nu_0\sigma^2_0 + \sum_{i = 1}^{n_j}(Z_{i, j}-\beta_j^TX_{i, j})^2] / 2)
 \end{aligned}
 $$
-
-
