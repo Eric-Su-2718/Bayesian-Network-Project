@@ -1,0 +1,231 @@
+---
+title: "STA531 Final Project-Preliminary Report"
+author: "Eric Su"
+date: "`r Sys.Date()`"
+header-includes:
+   - \usepackage{tikz}
+   - \usetikzlibrary{bayesnet}
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(readr)
+library(tidyverse)
+library(lubridate)
+```
+
+## R Markdown
+```{r, message=FALSE, warning=FALSE}
+Tennis = read_csv("Data.csv")
+
+Tennis_df = Tennis %>%
+  mutate(Comment = Comment %>% str_replace("Compleed", "Completed")) %>%
+  filter(Comment == "Completed", Round != "0th Round", !(`Best of` %in% c(0, 1))) %>%
+  select(Location:LRank, WPts:LPts) %>%
+  mutate(Series = Series %>% recode("International"        = "ATP250",
+                                    "International Series" = "ATP250",
+                                    "International Gold"   = "ATP500",
+                                    "Masters"              = "Masters 1000")) %>%
+  separate(Date, c("Day", "Month", "Year"), "/") %>%
+  mutate(WPts  = as.numeric(WPts),
+         LPts  = as.numeric(LPts),
+         WRank = as.numeric(WRank),
+         LRank = as.numeric(LRank)) %>%
+  mutate(LRank_temp = LRank,
+         WPts_temp = WPts,
+         LRank = ifelse(Year == "2007" & Series == "Masters Cup", WPts_temp, LRank),
+         WPts = ifelse(Year == "2007" & Series == "Masters Cup", LRank_temp, WPts),
+         LRank = ifelse(Year == "2012" & Tournament == "Brisbane International" & Round == "The Final",
+                        WPts_temp, LRank),
+         WPts = ifelse(Year == "2012" & Tournament == "Brisbane International" & Round == "The Final",
+                       LRank_temp, WPts)) %>%
+  select(-LRank_temp, -WPts_temp)
+```
+
+```{r}
+perm_year = Tennis_df %>% 
+  gather(key = "WL", value = "Player", Winner, Loser) %>%
+  mutate(Pts = as.numeric(ifelse(WL == "Winner", WPts, LPts)),
+         logPts = log(Pts),
+         Rank = as.numeric(ifelse(WL == "Winner", WRank, LRank)),
+         WL = ifelse(WL == "Winner", 1, 0)) %>%
+  select(Series, Pts, Rank, WL) %>%
+  group_by(Series) %>%
+  summarise(Pts = mean(Pts, na.rm = T),
+            Rank = mean(Rank, na.rm = T))
+perm_year
+```
+
+```{r, message=FALSE, warning=FALSE}
+perm_year = Tennis_df %>% 
+  gather(key = "WL", value = "Player", Winner, Loser) %>%
+  mutate(Pts = as.numeric(ifelse(WL == "Winner", WPts, LPts)),
+         logPts = log(Pts),
+         Rank = as.numeric(ifelse(WL == "Winner", WRank, LRank)),
+         WL = ifelse(WL == "Winner", 1, 0)) %>%
+  select(Pts, logPts, Rank, WL)
+cor(perm_year, use = "complete.obs")
+```
+
+```{r}
+thresh = 100
+player_names = which(c(Tennis_df$Winner, Tennis_df$Loser) %>% table() < thresh) %>% names()
+Tennis_df = Tennis_df %>%
+  mutate(Winner = Winner %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}),
+         Loser  = Loser  %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}))
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+name = c("Federer R.", "Nadal R.", "Djokovic N.", "Ferrer D.", "Roddick A.", "Murray A.", "Berdych T.", "Robredo T.", "Hewitt L.", "Davydenko N.", "Youzhny M.", "Verdasco F.", "Ferrero J.C.", "Gasquet R.")
+player_name = name[c(1:3, 6)]
+perm_year = Tennis_df %>% filter(Winner %in% player_name | Loser %in% player_name) %>% 
+  gather(key = "WL", value = "Player", Winner, Loser) %>%
+  mutate(Pts = ifelse(WL == "Winner", WPts, LPts), 
+         Year = as.numeric(Year)) %>%
+  filter(Player %in% player_name) %>%
+  group_by(Year, Player) %>%
+  select(WL, Pts) %>%
+  summarise(Win = length(which(WL == "Winner")) / length(WL), 
+            Pts = mean(as.numeric(Pts), na.rm = T))
+cor(perm_year[, 3:4], use = "complete.obs")
+
+perm_year_plot = perm_year %>% gather(key = "key", value = "value", Win, Pts) %>%
+  mutate(Player = factor(Player))
+ggplot(perm_year_plot, aes(x = Year, y = value, color = Player))+
+  geom_line(size = 1.5)+
+  facet_grid(key~., scales = "free_y")+
+  theme_bw()+
+  labs(title = "Average points and win percentage of the Big 4")
+```
+
+```{r, message=FALSE, warning=FALSE}
+player_name = name[c(1:3, 6)]
+perm_year = Tennis_df %>% filter(Winner %in% player_name & Loser %in% player_name) %>% 
+  gather(key = "WL", value = "Player", Winner, Loser) %>%
+  mutate(Pts = ifelse(WL == "Winner", WPts, LPts), 
+         Year = as.numeric(Year)) %>%
+  group_by(Year, Player) %>%
+  select(WL, Pts) %>%
+  summarise(Win = length(which(WL == "Winner")) / length(WL), 
+            Pts = mean(as.numeric(Pts), na.rm = T),
+            n = n())
+cor(perm_year[, 3:4], use = "complete.obs")
+
+perm_year_plot = perm_year %>% gather(key = "key", value = "value", Win, Pts) %>%
+  mutate(Player = factor(Player))
+ggplot(perm_year_plot, aes(x = Year, y = value, color = Player))+
+  geom_line(size = 1.5)+
+  facet_grid(key~., scales = "free_y")+
+  theme_bw()+
+  labs(title = "Average points and win percentage(against each other) of the Big 4")
+```
+
+```{r, message=FALSE, warning=FALSE}
+name = c("Federer R.", "Nadal R.", "Djokovic N.", "Ferrer D.", "Roddick A.", "Murray A.", "Berdych T.", "Robredo T.", "Hewitt L.", "Davydenko N.", "Youzhny M.", "Verdasco F.", "Ferrero J.C.", "Gasquet R.")
+player_name = name[c(1:3, 6)]
+perm_year = Tennis_df %>% filter(Winner %in% player_name | Loser %in% player_name) %>% 
+  gather(key = "WL", value = "Player", Winner, Loser) %>%
+  mutate(Year = as.numeric(Year)) %>%
+  filter(Player %in% player_name) %>%
+  group_by(Year, Player, Series) %>%
+  select(WL) %>%
+  summarise(Win = length(which(WL == "Winner")) / length(WL))
+
+ggplot(perm_year, aes(x = Year, y = Win, color = factor(Series)))+
+  geom_line(size = 1.5)+
+  facet_grid(Player~.)+
+  theme_bw()+
+  labs(title = "Win percentage of the Big 4 for different series")
+```
+
+# Model
+The graphical model this project uses can be expressed using the graph below.
+
+\begin{figure}[h]
+  \centering
+  \tikz{ %
+  	\node[latent] (Z) {$Z_{i}$} ; %
+  	\node[latent, above=of Z, xshift=-1cm] (beta) {$\beta_j$} ; %
+  	\node[latent, above=of Z, xshift=1cm] (sigma) {$\sigma^2_j$} ; %
+  	\node[latent, above=of beta, xshift=-1cm] (mu) {$\mu$} ; %
+  	\node[latent, above=of beta, xshift=1cm] (S) {$\Sigma$} ; %
+    \node[obs, left=of Z] (x) {$X_i$} ; %
+    \node[obs, below=of Z] (Y) {$Y_i$} ; %
+    
+    \plate[inner sep=0.25cm, yshift=0.2cm] {plate1} {(beta) (sigma)} {$M$}; %
+    \plate[inner sep=0.25cm, xshift=-0.12cm, yshift=0.12cm] {plate2} {(x) (Z) (Y)} {$N$}; %
+    
+    \edge {mu, S} {beta} ; %
+    \edge {beta, sigma} {Z} ; %
+    \edge {x} {Z} ; %
+    \edge {Z} {Y} ; %
+  }
+\end{figure}
+where matches are represented using the index $i = 1,...,N$ and players are represented using the index $j = 1, ..., M$ with variables
+$$
+\begin{aligned}
+X_i&: \text{Vector of external conditions (Series, Court, Surface, Round, Best of 3/4, Opponent rank)} \\
+Y_i&: \text{Match outcome} \\
+Z_{i, 1:2}&: \text{Performance level of the two players} \\
+\beta_j &: \text{Vector of regression coefficients} \\
+\sigma_j^2 &: \text{Variance parameter for performance} \\
+\mu &: \text{Mean hyperparameter for } \beta_j \\
+\Sigma &: \text{Variance hyperparameter for } \beta_j
+\end{aligned}
+$$
+The outcome of each match will be modelled using the distribution:
+$$
+\begin{aligned}
+Y_i =\left\{
+    \begin{array}{ll}
+        1 & \text{if } Z_{i, 1} \geq Z_{i, 2} \\
+        0 &\text{if } Z_{i, 1} < Z_{i, 2}
+    \end{array}
+\right.
+\end{aligned}
+$$
+For player $j$, his performance level in match $i$ will be a linear combination of $X_i$(external factors) as shown below.
+$$
+\begin{aligned}
+Z_{i, 1 \text{ or } 2}^{(j)} &= X_i^T \beta_j + \epsilon_{i, j} & \epsilon_{i, j}\sim N(0, \sigma^2_j)
+\end{aligned}
+$$
+with
+$$
+\begin{aligned}
+\beta_j \sim N(\mu, \Sigma)
+\end{aligned}
+$$
+The prior distributions for this model will be
+$$
+\begin{aligned}
+\mu &\sim N(\mu_0, \Lambda_0) \\
+\Sigma &\sim \text{inverse-Wishart}(\eta_0, S_0^{-1}) \\
+\sigma^2_j &\sim \text{inverse-gamma}(\nu_0/2, \nu_0\sigma^2_0 / 2)
+\end{aligned}
+$$
+The parameters of our model would be estimated using a Gibbs sampler with full conditionals as follows. We will use $Z_j$ and $X_j$ to indicate all (matrix) performace levels and external conditions for player $j$ and $n_j$ to represent the number of matches player $j$ is involved.
+$$
+\begin{aligned}
+p(Z_{i, 1}^{(j)} \mid X_i, Y_i, Z_{i, 2}, \beta_j, \sigma_j^2) &= \left\{
+    \begin{array}{ll}
+        \text{Truncated Normal}(X_i^T \beta_j, \sigma^2_j, Z_{i, 2}, \infty) & \text{if } Y_i = 1 \\
+        \text{Truncated Normal}(X_i^T \beta_j, \sigma^2_j, -\infty, Z_{i, 2}) &\text{if } Y_i = 0
+    \end{array}
+\right. \\
+p(Z_{i, 2}^{(j)} \mid X_i, Y_i, Z_{i, 1}, \beta_j, \sigma_j^2) &= \left\{
+    \begin{array}{ll}
+        \text{Truncated Normal}(X_i^T \beta_j, \sigma^2_j, -\infty, Z_{i, 1}) & \text{if } Y_i = 1 \\
+        \text{Truncated Normal}(X_i^T \beta_j, \sigma^2_j, Z_{i, 1}, \infty) &\text{if } Y_i = 0
+    \end{array}
+\right. \\
+p(\beta_j \mid X_j, Z_j, \mu, \Sigma) &= N((\Sigma^{-1} + X_j^TX_j / \sigma^2_j)^{-1} (\Sigma^{-1}\mu + X_j^TZ_j / \sigma^2_j), (\Sigma^{-1} + X_j^TX_j / \sigma^2_j)^{-1}) \\
+p(\mu \mid \beta_{1:M}, \Sigma) &= N((\Lambda_0^{-1} + M\Sigma^{-1})^{-1}(\Lambda_0^{-1}\mu_0 + M\Sigma^{-1}\bar{\beta}), (\Lambda_0^{-1} + M\Sigma^{-1})^{-1}) \\
+p(\Sigma \mid \beta_{1:M}, \mu) &= \text{inverse-Wishart}(\eta_0 + M, (S_0+\sum_{j=1}^M(\beta_j - \mu)(\beta_j - \mu)^T)^{-1}) \\
+p(\sigma^2_j \mid \beta_j, X_j) &= \text{inverse-gamma}((\nu_0 + n_j)/2, [\nu_0\sigma^2_0 + \sum_{i = 1}^{n_j}(Z_{i, j}-\beta_j^TX_{i, j})^2] / 2)
+\end{aligned}
+$$
+
+
