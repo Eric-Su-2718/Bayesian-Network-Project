@@ -5,18 +5,22 @@ date: "`r Sys.Date()`"
 header-includes:
    - \usepackage{tikz}
    - \usetikzlibrary{bayesnet}
+   - \usepackage{hanging}
 output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
 library(readr)
 library(tidyverse)
 library(lubridate)
+library(knitr)
+library(coda)
+
+opts_chunk$set(echo = FALSE, eval = FALSE, message = FALSE, warning = FALSE)
+options(knitr.kable.NA = '')
 ```
 
-## R Markdown
-```{r, message=FALSE}
+```{r, import tennis data}
 Tennis = read_csv("Data.csv")
 
 Tennis_df = Tennis %>%
@@ -43,97 +47,140 @@ Tennis_df = Tennis %>%
   select(-LRank_temp, -WPts_temp)
 ```
 
-```{r}
-perm_year = Tennis_df %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = as.numeric(ifelse(WL == "Winner", WPts, LPts)),
-         logPts = log(Pts),
-         Rank = as.numeric(ifelse(WL == "Winner", WRank, LRank)),
-         WL = ifelse(WL == "Winner", 1, 0)) %>%
-  select(Series, Pts, Rank, WL) %>%
-  group_by(Series) %>%
-  summarise(Pts = mean(Pts, na.rm = T),
-            Rank = mean(Rank, na.rm = T))
-perm_year
+```{r model data}
+Tennis_df = Tennis_df %>%
+  filter(Surface != "Carpet") %>%
+  mutate(`Best of` = as.character(`Best of`),
+         RankDiff = LRank - WRank,
+         Surface = factor(Surface, levels = c("Hard", "Clay", "Grass")))
+Tennis_df = Tennis_df %>% select(Series, Court, Surface, Round, Winner, Loser, WRank, LRank, RankDiff) %>%
+  na.omit()
+
+thresh = 100
+player_names = which(c(Tennis_df$Winner, Tennis_df$Loser) %>% table() < thresh) %>% names()
+Tennis_df = Tennis_df %>%
+  mutate(Winner = Winner %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}),
+         Loser  = Loser  %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}))
+
+unique_player = c(Tennis_df$Winner, Tennis_df$Loser) %>% unique()
+X = model.matrix(~ Series + Court + Surface + Round, data = Tennis_df)
+X_win = X
+X_lose = X
+
+n_player = length(unique_player)
+n_match = nrow(Tennis_df)
+n_beta = ncol(X)
 ```
 
-```{r, message=FALSE, warning=FALSE}
-perm_year = Tennis_df %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = as.numeric(ifelse(WL == "Winner", WPts, LPts)),
-         logPts = log(Pts),
-         Rank = as.numeric(ifelse(WL == "Winner", WRank, LRank)),
-         WL = ifelse(WL == "Winner", 1, 0)) %>%
-  select(Pts, logPts, Rank, WL)
-cor(perm_year, use = "complete.obs")
+```{r player index for each match}
+player_index = data.frame(player = unique_player, index = 1:n_player)
+win_dex = plyr::mapvalues(Tennis_df$Winner, player_index$player, player_index$index) %>% as.numeric()
+lose_dex = plyr::mapvalues(Tennis_df$Loser, player_index$player, player_index$index) %>% as.numeric()
+
+player_index_win = vector("list", n_player)
+player_index_lose = vector("list", n_player)
+nj = rep(NA, n_player)
+for (i in 1:n_player) {
+  wins = which(Tennis_df$Winner == player_index$player[i]) %>% as.numeric()
+  loses = which(Tennis_df$Loser == player_index$player[i]) %>% as.numeric()
+  player_index_win[[i]] = wins
+  player_index_lose[[i]] = loses
+  nj[i] = length(wins) + length(loses)
+}
 ```
 
-
-```{r, message=FALSE, warning=FALSE}
-name = c("Federer R.", "Nadal R.", "Djokovic N.", "Ferrer D.", "Roddick A.", "Murray A.", "Berdych T.", "Robredo T.", "Hewitt L.", "Davydenko N.", "Youzhny M.", "Verdasco F.", "Ferrero J.C.", "Gasquet R.")
-player_name = name[c(1:3, 6)]
-perm_year = Tennis_df %>% filter(Winner %in% player_name | Loser %in% player_name) %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = ifelse(WL == "Winner", WPts, LPts), 
-         Year = as.numeric(Year)) %>%
-  filter(Player %in% player_name) %>%
-  group_by(Year, Player) %>%
-  select(WL, Pts) %>%
-  summarise(Win = length(which(WL == "Winner")) / length(WL), 
-            Pts = mean(as.numeric(Pts), na.rm = T))
-cor(perm_year[, 3:4], use = "complete.obs")
-
-perm_year_plot = perm_year %>% gather(key = "key", value = "value", Win, Pts) %>%
-  mutate(Player = factor(Player))
-ggplot(perm_year_plot, aes(x = Year, y = value, color = Player))+
-  geom_line(size = 1.5)+
-  facet_grid(key~., scales = "free_y")+
-  theme_bw()+
-  labs(title = "Average points and win percentage of the Big 4")
+```{r, prior parameters}
+mu_0 = rep(0, n_beta)
+L_0 = diag(1000, n_beta)
+iL_0 = solve(L_0)
+nu_0 = 1
+sigma_0 = 1000
 ```
 
-```{r, message=FALSE, warning=FALSE}
-player_name = name[c(1:3, 6)]
-perm_year = Tennis_df %>% filter(Winner %in% player_name & Loser %in% player_name) %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Pts = ifelse(WL == "Winner", WPts, LPts), 
-         Year = as.numeric(Year)) %>%
-  group_by(Year, Player) %>%
-  select(WL, Pts) %>%
-  summarise(Win = length(which(WL == "Winner")) / length(WL), 
-            Pts = mean(as.numeric(Pts), na.rm = T),
-            n = n())
-cor(perm_year[, 3:4], use = "complete.obs")
+```{r, variables to store results}
+n_Gibbs = 1000 + 50000
+var_name = colnames(X)
+Z = matrix(0, ncol = 2, nrow = n_match)
 
-perm_year_plot = perm_year %>% gather(key = "key", value = "value", Win, Pts) %>%
-  mutate(Player = factor(Player))
-ggplot(perm_year_plot, aes(x = Year, y = value, color = Player))+
-  geom_line(size = 1.5)+
-  facet_grid(key~., scales = "free_y")+
-  theme_bw()+
-  labs(title = "Average points and win percentage(against each other) of the Big 4")
+BETA = vector("list", n_player)
+for (i in 1:n_player) {
+  beta = matrix(NA, ncol = n_beta, nrow = n_Gibbs)
+  colnames(beta) = var_name
+  BETA[[i]] = beta
+}
+
+MU = matrix(NA, ncol = n_beta, nrow = n_Gibbs)
+
+SIGMA = vector("list", n_Gibbs)
+for (i in 1:n_Gibbs) {
+  SIGMA[[i]] = matrix(NA, ncol = n_beta, nrow = n_beta)
+}
+
+Sig = matrix(NA, ncol = n_player, nrow = n_Gibbs)
 ```
 
-```{r, message=FALSE, warning=FALSE}
-name = c("Federer R.", "Nadal R.", "Djokovic N.", "Ferrer D.", "Roddick A.", "Murray A.", "Berdych T.", "Robredo T.", "Hewitt L.", "Davydenko N.", "Youzhny M.", "Verdasco F.", "Ferrero J.C.", "Gasquet R.")
-player_name = name[c(1:3, 6)]
-perm_year = Tennis_df %>% filter(Winner %in% player_name | Loser %in% player_name) %>% 
-  gather(key = "WL", value = "Player", Winner, Loser) %>%
-  mutate(Year = as.numeric(Year)) %>%
-  filter(Player %in% player_name) %>%
-  group_by(Year, Player, Series) %>%
-  select(WL) %>%
-  summarise(Win = length(which(WL == "Winner")) / length(WL))
+```{r, Gibbs sampler}
+library(MCMCpack)
+library(truncnorm)
+library(mvtnorm)
+beta = matrix(0, ncol = n_beta, nrow = n_player)
+sig = rep(1, n_player)
 
-ggplot(perm_year, aes(x = Year, y = Win, color = factor(Series)))+
-  geom_line(size = 1.5)+
-  facet_grid(Player~.)+
-  theme_bw()+
-  labs(title = "Win percentage of the Big 4 for different series")
+Xj = vector("list", n_player)
+for (i in 1:n_player) {
+  Xj[[i]] = rbind(X_win[player_index_win[[i]], ], X_lose[player_index_lose[[i]], ])
+}
+for (i in 1:n_Gibbs) {
+  #sample Z
+  beta_win = beta[win_dex, ]
+  beta_lose = beta[lose_dex, ]
+  Z[, 1] = rtruncnorm(n_match, a = Z[, 2], b = Inf, mean = colSums(t(X_win) * t(beta_win)), sd = sqrt(sig))
+  Z[, 2] = rtruncnorm(n_match, a = -Inf, b = Z[, 1], mean = colSums(t(X_lose) * t(beta_lose)), sd = sqrt(sig))
+  
+  Zj = vector("list", n_player)
+  #sample BETA
+  for (j in 1:n_player) {
+    Zj[[j]] = c(Z[, 1][player_index_win[[j]]], Z[, 2][player_index_lose[[j]]])
+    beta_var = solve(iL_0 + t(Xj[[j]]) %*% Xj[[j]] / sig[j])
+    beta_mu = beta_var %*% (iL_0 %*% mu_0 + t(Xj[[j]]) %*% Zj[[j]] / sig[j])
+    beta_samp = rmvnorm(1, beta_mu, beta_var)
+    beta[j, ] = beta_samp
+    BETA[[j]][i, ] = beta_samp
+  }
+  
+  #sample sig
+  SSR = rep(NA, n_player)
+  for (j in 1:n_player) {
+    SSR[j] = sum(as.numeric((Zj[[j]] -  Xj[[j]] %*% beta[j, ])^2))
+  }
+  sig = rinvgamma(n_player, (nu_0 + nj) / 2, (nu_0 *sigma_0  + SSR) / 2)
+  Sig[i, ] = sig
+}
 ```
 
-# Model
-The graphical model this project uses can be expressed using the graph below.
+## Abstract
+The performance level in men's professional tennis is key in evaluating abilities of players and predicting outcomes of matches. Currently, the most widely used metrics to assess performance are the rankings, number of titles and win percentages. However, these measurements are heavily influenced by a few major tournaments, and are also affected by the proportion of different court surfaces on the ATP tour. The goal of this project is to develop a reliable method that quantifies performance levels of professional tennis players without the aforementioned problems. We utilize a Bayesian network model with performance level as a hidden variable. Analyses are mainly focused on comparing performance levels of four dominant players in the past 10 years, the so-called *Big 4* of men's professional tennis, namely *Roger Federer, Rafael Nadal, Novak Djokovic* and *Andy Murray*.
+
+## Introduction
+What influence the performance of a professional tennis player? Internal factors such as talent, age, mental strength and external factors such as tournament level, surface properties, sets played might all be essential. However, internal factors are often unobservable and difficult to utilize in practice. We want to find a method to quantify performance that is solely based on external factors. Such model would allow us to estimate effects of changing specific external variables.
+
+Having the ability to estimate perfomance level of players given a set of conditions enables us to answer questions such as "What is the probability of a player winning a particular match?" or "How does a player's performance level change with respect to different tennis surfaces?". This could be useful for predicting match outcomes and comparing performance levels in hypothetical situations.
+
+The most widely considered metrics in evaluating player performance include rankings, points, win percentages and number of major titles. These measurements are all related-rankings of players are determined by the amount of points they earned and dfferent levels of tournaments award different amount of points. For example, an ATP 500 series gives the champion 500 points, a Masters 1000 tournament gives the champion 1000 points, while each Grand Slam (the highest tournament level) awards the champion 2000 points.
+
+Since the amount of points a player gains heavily depend on outcome of certain matches (Grand slam matches in particular), differences in points may be the result of random variations. Win percentage also has the problem of not taking the performance levels of opponents into account. Obviously, winning against tougher opponents is less likely than winning over weaker opponents, but neither points nor win percentage reflect this. 
+
+Consequently, we want a more reliable method to quantify players' performance levels. Ideally, the method should put more weight on matches against tougher opponents and it should also give us a number that can be used to compare players. In addition, we want our model to give us information on how each external factor affects a player's performance. The model we use is a Bayesian network model with performance level as a hidden variable. It quantifies performance level into a number and allows us to predict win probabilities of players winning.
+
+The dataset we use is the official men's tennis ATP tour data from 2000 to 2016. Important variables for our project include Series (Tournament level), Court (Indoor or outdoor), Surface (Hard, Clay or Grass), Round ($1^{\text{st}}$ round, $2^{\text{nd}}$ round, ..., semifinal, finals), player names and match outcomes. The dataset can be found on the Kaggle website: https://www.kaggle.com/jordangoblet/atp-tour-20002016
+
+## Previous work
+Little academic work has been done on evaluating the performance of professional tennis players. Shang-Min Ma et al. (2013) analyzed variables related to tennis performance using a logistic regression model. However, their study included match statistics such as number of aces and percentage of 1st serves won. These variables can only be observed after the match and thus are not useful for prediction. Other researchers have tried to quantify player performance using accumulated matches played and won at various tournament levels (Asmita Chitnisa and Omkarprasad Vaidya, 2014) or using direct match statistics (Filipcic Ales et al., 2015). The result of these studies can not be used to compare potential performance level when particular external factors are altered, since they did not seperate the external factors and match specific factors.
+
+## Methods
+To evaluate performance levels of different players, we must estimate player specific parameters such as the effect of playing on clay for different players. Since there are over 1200 players in the dataset and many of them only played in a few matches, we run into the issue of not having enough data for these players. As a result, we filtered out all tennis players who played in less than 100 matches and group them into a single catagory called "Other". This catagory will be used as a benchmark group which represents the average players.
+
+We use a Bayesian network model with perfomance level as a hidden variable to represent how variables affect one another. Our hypothesis is that each player exhibits a certain level of performance in a match and the the winner of the match is the one that has a higher performance level. The performance levels are hypothethized to be normally distributed, with mean being a linear combination of external factors and a baseline. The baseline indicates the performance level of a player in a first-round, indoor hard court, ATP 250 tournament. This model can be interpreted as a combination of two probit regression models for each players performance level, and the outcome of any particular match is determined by comparing the results from the two probit regressions. The model is illustrated below as a graph.
 
 \begin{figure}[h]
   \centering
@@ -141,15 +188,12 @@ The graphical model this project uses can be expressed using the graph below.
   	\node[latent] (Z) {$Z_{i}$} ; %
   	\node[latent, above=of Z, xshift=-1cm] (beta) {$\beta_j$} ; %
   	\node[latent, above=of Z, xshift=1cm] (sigma) {$\sigma^2_j$} ; %
-  	\node[latent, above=of beta, xshift=-1cm] (mu) {$\mu$} ; %
-  	\node[latent, above=of beta, xshift=1cm] (S) {$\Sigma$} ; %
     \node[obs, left=of Z] (x) {$X_i$} ; %
     \node[obs, below=of Z] (Y) {$Y_i$} ; %
     
     \plate[inner sep=0.25cm, yshift=0.2cm] {plate1} {(beta) (sigma)} {$M$}; %
     \plate[inner sep=0.25cm, xshift=-0.12cm, yshift=0.12cm] {plate2} {(x) (Z) (Y)} {$N$}; %
     
-    \edge {mu, S} {beta} ; %
     \edge {beta, sigma} {Z} ; %
     \edge {x} {Z} ; %
     \edge {Z} {Y} ; %
@@ -158,15 +202,14 @@ The graphical model this project uses can be expressed using the graph below.
 where matches are represented using the index $i = 1,...,N$ and players are represented using the index $j = 1, ..., M$ with variables
 $$
 \begin{aligned}
-X_i&: \text{Vector of external conditions (Series, Court, Surface, Round, Best of 3/4, Opponent rank)} \\
+X_i&: \text{Vector of external conditions (Series, Court, Surface, Round, Opponent rank)} \\
 Y_i&: \text{Match outcome} \\
 Z_{i, 1:2}&: \text{Performance level of the two players} \\
 \beta_j &: \text{Vector of regression coefficients} \\
-\sigma_j^2 &: \text{Variance parameter for performance} \\
-\mu &: \text{Mean hyperparameter for } \beta_j \\
-\Sigma &: \text{Variance hyperparameter for } \beta_j
+\sigma_j^2 &: \text{Variance parameter for performance}
 \end{aligned}
 $$
+
 The outcome of each match will be modelled using the distribution:
 $$
 \begin{aligned}
@@ -184,21 +227,23 @@ $$
 Z_{i, 1 \text{ or } 2}^{(j)} &= X_i^T \beta_j + \epsilon_{i, j} & \epsilon_{i, j}\sim N(0, \sigma^2_j)
 \end{aligned}
 $$
-with
+The prior distributions for this model are
 $$
 \begin{aligned}
-\beta_j \sim N(\mu, \Sigma)
-\end{aligned}
-$$
-The prior distributions for this model will be
-$$
-\begin{aligned}
-\mu &\sim N(\mu_0, \Lambda_0) \\
-\Sigma &\sim \text{inverse-Wishart}(\eta_0, S_0^{-1}) \\
+\beta_j &\sim N(\mu_0, \Sigma_0) \\
 \sigma^2_j &\sim \text{inverse-gamma}(\nu_0/2, \nu_0\sigma^2_0 / 2)
 \end{aligned}
 $$
-The parameters of our model would be estimated using a Gibbs sampler with full conditionals as follows. We will use $Z_j$ and $X_j$ to indicate all (matrix) performace levels and external conditions for player $j$ and $n_j$ to represent the number of matches player $j$ is involved.
+with
+$$
+\begin{aligned}
+\mu_0 &= \textbf{0} \\
+\Sigma_0 &= 1000\textbf{I}\\
+\nu_0 &= 1 \\
+\sigma^2_0 &= 1000
+\end{aligned}
+$$
+The parameters of our model would be estimated using a Gibbs sampler with full conditionals as follows. We use $Z_j$ and $X_j$ to indicate all (matrix) performace levels and external conditions for player $j$ and $n_j$ to represent the number of matches player $j$ is involved.
 $$
 \begin{aligned}
 p(Z_{i, 1}^{(j)} \mid X_i, Y_i, Z_{i, 2}, \beta_j, \sigma_j^2) &= \left\{
@@ -214,128 +259,273 @@ p(Z_{i, 2}^{(j)} \mid X_i, Y_i, Z_{i, 1}, \beta_j, \sigma_j^2) &= \left\{
     \end{array}
 \right. \\
 p(\beta_j \mid X_j, Z_j, \mu, \Sigma) &= N((\Sigma^{-1} + X_j^TX_j / \sigma^2_j)^{-1} (\Sigma^{-1}\mu + X_j^TZ_j / \sigma^2_j), (\Sigma^{-1} + X_j^TX_j / \sigma^2_j)^{-1}) \\
-p(\mu \mid \beta_{1:M}, \Sigma) &= N((\Lambda_0^{-1} + M\Sigma^{-1})^{-1}(\Lambda_0^{-1}\mu_0 + M\Sigma^{-1}\bar{\beta}), (\Lambda_0^{-1} + M\Sigma^{-1})^{-1}) \\
-p(\Sigma \mid \beta_{1:M}, \mu) &= \text{inverse-Wishart}(\eta_0 + M, (S_0+\sum_{j=1}^M(\beta_j - \mu)(\beta_j - \mu)^T)^{-1}) \\
 p(\sigma^2_j \mid \beta_j, X_j) &= \text{inverse-gamma}((\nu_0 + n_j)/2, [\nu_0\sigma^2_0 + \sum_{i = 1}^{n_j}(Z_{i, j}-\beta_j^TX_{i, j})^2] / 2)
 \end{aligned}
 $$
 
-```{r data}
-Tennis_df = Tennis_df %>% select(Series, Court, Surface, Round, `Best of`, Winner, Loser, WRank, LRank) %>%
-  na.omit()
-thresh = 100
-player_names = which(c(Tennis_df$Winner, Tennis_df$Loser) %>% table() < thresh) %>% names()
-Tennis_df = Tennis_df %>%
-  mutate(Winner = Winner %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}),
-         Loser  = Loser  %>% sapply(function(x) if(x %in% player_names){return("Other")} else{return(x)}))
-unique_player = c(Tennis_df$Winner, Tennis_df$Loser) %>% unique()
-X = model.matrix(~ Series + Court + Surface + Round + `Best of` + WRank + LRank, data = Tennis_df)
-X_win = X[, -ncol(X)]
-X_lose = X[, -(ncol(X) - 1)]
-
-n_player = length(unique_player)
-n_match = nrow(Tennis_df)
-n_beta = ncol(X) - 1
-```
-
-```{r player index for each match, message=FALSE}
-player_index = data.frame(player = unique_player, index = 1:n_player)
-win_dex = plyr::mapvalues(Tennis_df$Winner, player_index$player, player_index$index) %>% as.numeric()
-lose_dex = plyr::mapvalues(Tennis_df$Loser, player_index$player, player_index$index) %>% as.numeric()
-
-player_match_index = vector("list", n_player)
-nj = rep(NA, n_player)
+```{r import Gibbs sampler results, eval=TRUE}
+load(".RData")
+BETA = map(BETA, function(x) return(x[2001:n_Gibbs, ]))
+Sig = Sig[2001:n_Gibbs, ]
+center = mean(BETA[[1]][, 1])
 for (i in 1:n_player) {
-  wins = which(Tennis_df$Winner == player_index$player[i])
-  loses = which(Tennis_df$Loser == player_index$player[i])
-  player_match_index[[i]] = data.frame(index = c(wins, loses), 
-                                       WL = c(rep(1, length(wins)), rep(2, length(loses))))
-  nj[i] = length(wins) + length(loses)
+  BETA[[i]][, 1] = BETA[[i]][, 1] - center
 }
+effSize = effectiveSize(BETA[[4]]) / (n_Gibbs - 1)
 ```
 
-```{r Hyperparameters}
-mu_0 = rep(0, n_beta)
-L_0 = diag(1, n_beta)
-iL_0 = solve(L_0)
-eta_0 = 1
-S_0 = t(L_0 - colMeans(L_0)) %*% (L_0 - colMeans(L_0))
-nu_0 = 1
-sigma_0 = 1
+```{r, eval=TRUE}
+BETAs = map_dfr(BETA, function(x){x = colMeans(x); x = as.data.frame(t(x)); colnames(x) = var_name; return(x)})
+SIGs = colMeans(Sig)
+beta_win = BETAs[win_dex, ]
+beta_lose = BETAs[lose_dex, ]
+Z1 = colSums(t(X_win) * t(beta_win))
+Z2 = colSums(t(X_lose) * t(beta_lose))
+pred = ifelse(Z1 >= Z2, 1, 0)
+```
+We use a burn-in of 2000 samples with no thinning. The effective sample size of the coefficients are all around 15-20% of the total sample size. Since there are 244 unique players, we cannot show traceplots for all players. Below we show traceplots of coefficients for the player *Roger Federer*. No apparent convergent issue can be found in these plots.
+
+```{r, eval=TRUE, out.height="70%", out.width="70%"}
+BETA_melt = gather(as.data.frame(BETA[[4]]))
+trace_df = data.frame(iter = rep(1:(n_Gibbs - 2000), n_beta + 1), samp = c(BETA_melt$value, Sig[, 4]),
+                      param = rep(c("Baseline", "ATP500", "Grand Slam", "Masters 1000", "Masters Cup",
+                                    "Outdoor", "Clay", "Grass", "2nd Round", "3rd Round", "4th Round",
+                                    "Quarterfinals","Round Robin", "Semifinals", "The Final", "Variance"), 
+                                  each = n_Gibbs - 2000))
+trace_df$param = factor(trace_df$param, levels = c("Baseline", "ATP500", "Grand Slam", "Masters 1000",
+                                                   "Masters Cup","Outdoor", "Clay", "Grass", "2nd Round",
+                                                   "3rd Round", "4th Round","Quarterfinals","Round Robin",
+                                                   "Semifinals", "The Final", "Variance"))
+                                    
+ggplot(trace_df, aes(x = iter, y = samp))+
+  geom_line()+
+  facet_wrap(~param, scales = "free_y")+
+  theme_bw()+
+  scale_x_continuous(labels = NULL)+
+  labs(x = "iteration", y = "value", title = "Traceplots of coefficients and variance for Federer")
 ```
 
-```{r variables to store samples}
-n_Gibbs = 1000 + 10000
+We also use Geweke’s convergence diagnostics to test whether the parameters have convergent problems. None of the tests are significant, suggesting that no evidence for unequal means exists in the MCMC chain.
 
-Z = matrix(0, ncol = 2, nrow = n_match)
+The estimated coefficients for the intercept (baseline performance) are all centered to make the baseline performance of the "Other" player group to be 0. Our model have an accuracy around 70% for predicting match outcomes. 
 
-BETA = vector("list", n_player)
-for (i in 1:n_player) {
-  BETA[[i]] = matrix(NA, ncol = n_beta, nrow = n_Gibbs)
-}
+## Results
+We first look at the overall distribution of the players' performance level at the baseline situation, which are matches played in the first-round of ATP 250 tournaments.
 
-MU = matrix(NA, ncol = n_beta, nrow = n_Gibbs)
+```{r, eval=TRUE, out.height="70%", out.width="70%"}
+#ATP250 first round
+cond_hard_out = c(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+cond_hard_in  = c(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+cond_clay     = c(1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0)
+cond_grass    = c(1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0)
+play_dist_plt = data.frame(level = c(as.matrix(BETAs) %*% cond_hard_out,
+                                     as.matrix(BETAs) %*% cond_hard_in,
+                                     as.matrix(BETAs) %*% cond_clay,
+                                     as.matrix(BETAs) %*% cond_grass), 
+                           surface = rep(c("Hard(Outdoor)", "Hard(Indoor)", "Clay", "Grass"), 
+                                         each = n_player))
+play_dist_plt$surface = factor(play_dist_plt$surface, 
+                               levels = c("Hard(Outdoor)", "Hard(Indoor)", "Clay", "Grass"))
 
-SIGMA = vector("list", n_Gibbs)
-for (i in 1:n_Gibbs) {
-  SIGMA[[i]] = matrix(NA, ncol = n_beta, nrow = n_beta)
-}
-
-sig = matrix(NA, ncol = n_player, nrow = n_Gibbs)
+ggplot(play_dist_plt, aes(x = level))+
+  geom_histogram(bins = 20)+
+  facet_wrap(~surface)+
+  theme_bw()+
+  labs(x = "Performance level", 
+       title = "Distribution of performance levels of players in baseline situation")
 ```
 
-```{r Gibbs sampler, warning=FALSE}
-library(truncnorm)
-library(mvtnorm)
-beta = matrix(0, ncol = n_beta, nrow = n_player)
-iSigma = solve(diag(n_beta))
-sig = rep(1, n_player)
-mu = rep(0, n_beta)
+All the distributions are skewed to the left, with most players centered around the 100 mark and a handful of exceptionally good players. In fact, members of the *Big 4* are always in the top 5 players of all surfaces, showing that their performance levels are consistantly higher than others regardless of the condition. In addition, the variance of performance level on indoor hard court is much smaller than the variance on other types of surfaces.
 
-Xj = vector("list", n_player)
-for (i in 1:n_player) {
-  Xj[[i]] = data.frame(X[player_match_index[[i]]$index, -c(ncol(X) - 1, ncol(X))],
-                       oppRank = apply(cbind(X[player_match_index[[i]]$index, c(ncol(X) - 1, ncol(X))],
-                           player_match_index[[i]]$WL), 1, function(x) x[x[3]] %>% as.numeric())) %>%
-    as.matrix()
+Next let us turn our attention to results related to the *Big 4* and the "Other" player catagory in more detail. Below is a summary table (Table 1) showing the estimated coefficients and the respective highest posterior density (HPD) intervals.
+```{r, eval=TRUE}
+index = c(1, 4, 135, 163, 168)
+coef_df = cbind(t(BETAs[index[1], ]), HPDinterval(as.mcmc(BETA[[index[1]]])))
+sig = c(sqrt(SIGs[index[1]]), sqrt(HPDinterval(as.mcmc(Sig[, index[1]]))))
+for (i in 2:5){
+  coef_df = cbind(coef_df, t(BETAs[index[i], ]), HPDinterval(as.mcmc(BETA[[index[i]]])))
+  sig = c(sig, sqrt(SIGs[index[i]]), sqrt(HPDinterval(as.mcmc(Sig[, index[i]]))))
 }
+coef_df = rbind(coef_df, sig)
 
-for (i in 1:10) {
-  #sample Z
-  beta_win = beta[win_dex, ]
-  beta_lose = beta[lose_dex, ]
-  Z[, 1] = rtruncnorm(n_match, a = Z[, 2], b = Inf, mean = colSums(t(X_win) * t(beta_win)), sd = sqrt(sig))
-  Z[, 2] = rtruncnorm(n_match, a = -Inf, b = Z[, 1], mean = colSums(t(X_lose) * t(beta_lose)), sd = sqrt(sig))
-  
-  Zj = vector("list", n_player)
-  #sample BETA
-  for (j in 1:n_player) {
-    Zj[[j]] = apply(cbind(Z[player_match_index[[j]]$index, ], player_match_index[[j]]$WL), 
-               1, function(x) x[x[3]] %>% as.numeric())
-    beta_var = solve(iSigma + t(Xj[[j]]) %*% Xj[[j]] / sig[j])
-    beta_mu = beta_var %*% (iSigma %*% t(mu) + t(Xj[[j]]) %*% Zj[[j]] / sig[j])
-    beta_samp = rmvnorm(1, beta_mu, beta_var)
-    beta[j, ] = beta_samp
-    BETA[[j]][i, ] = beta_samp
-  }
-  
-  #sample MU
-  mu_var = solve(iL_0 + n_player * iSigma)
-  mu_mean = mu_var %*% (iL_0 %*% mu_0 + iSigma %*% colSums(beta))
-  mu_samp = rmvnorm(1, mu_mean, mu_var)
-  mu = mu_samp
-  MU[i, ] = mu_samp
-  
-  #sample SIGMA
-  M_mu = matrix(mu, n_player, n_beta, byrow = TRUE)
-  iSigma = rWishart(1, eta_0 + n_player, solve(S_0 + t(beta - M_mu) %*% (beta - M_mu)))[, , 1]
+colnames(coef_df) = rep(c("Est.", "Lower", "Upper"), length(index))
+rownames(coef_df) = c("Baseline", "ATP500", "Grand Slam", "Masters 1000", "Masters Cup",
+                      "Outdoor", "Clay", "Grass", "2nd Round", "3rd Round", "4th Round", "Quarterfinals",
+                      "Round Robin", "Semifinals", "The Final", "SD")
 
-  #sample sig
-  SSR = rep(NA, n_player)
-  for (j in 1:n_player) {
-    SSR[j] = sum(as.numeric((Zj[[j]] -  Xj[[j]] %*% beta[j, ])^2))
-  }
-  sig = 1 / rgamma(n_player, (nu_0 + nj) / 2, (nu_0 * sigma_0 + SSR) / 2)
-}
+kable(coef_df, "latex", booktabs = T, digits = 2, 
+      caption = "Estimated coefficients and standard deviations with HPD intervals") %>%
+  kableExtra::kable_styling(latex_options = c("hold_position", "scale_down")) %>%
+  kableExtra::add_header_above(c(" ", "Other" = 3, "Federer" = 3, "Nadal" = 3, "Djokovic" = 3,
+                                 "Murray" = 3)) %>%
+  kableExtra::group_rows("Series", 2, 5, latex_gap_space = "1em") %>%
+  kableExtra::group_rows("Court", 6, 6, latex_gap_space = "1em") %>%
+  kableExtra::group_rows("Surface", 7, 8, latex_gap_space = "1em") %>%
+  kableExtra::group_rows("Round", 9, 15, latex_gap_space = "1em") %>%
+  kableExtra::group_rows("Standard deviation", 16, 16, latex_gap_space = "1em")
 ```
 
+The baseline performance coefficients of all the *Big 4* players are significantly higher than that of the "Other" players. We also see that both *Federer* and *Murray* performs best on grass courts, *Nadal* performs best on clay courts, and *Djokovic*'s level is highest on outdoor hard courts, which is consistant with the general perception of these players. The *Big 4* all have better performance at Grand Slam tournaments. Also note that the estimated standard deviation for performance levels of all the players are relatively the same, this is also the case for all the players not presented in the table, which is against our general perception of some players being more consistant than others.
+
+$\\$
+$\\$
+$\\$
+$\\$
+$\\$
+$\\$
+$\\$
+
+
+The relative performance level of these players can be investigated in more detail by ploting the posterior predictive distribution of their performance levels. The plot below shows posterior predictive distributions of performance levels at Grand Slam final matches for different tennis courts.
+
+```{r sets of conditions 1, eval=TRUE, out.height="70%", out.width="70%"}
+#grand slam final
+cond_hard_out = c(1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+cond_hard_in  = c(1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+cond_clay     = c(1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1)
+cond_grass    = c(1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1)
+cond = cbind(cond_hard_out, cond_hard_in, cond_clay, cond_grass)
+z0 = as.matrix(BETAs[index[1], ]) %*% cond
+z1 = as.matrix(BETAs[index[2], ]) %*% cond
+z2 = as.matrix(BETAs[index[3], ]) %*% cond
+z3 = as.matrix(BETAs[index[4], ]) %*% cond
+z4 = as.matrix(BETAs[index[5], ]) %*% cond
+s0 = SIGs[index[1]]
+s1 = SIGs[index[2]]
+s2 = SIGs[index[3]]
+s3 = SIGs[index[4]]
+s4 = SIGs[index[5]]
+x = seq(min(z0, z1, z2, z3, z4) - 3 * sqrt(max(s0, s1, s2, s3, s4)), max(z0, z1, z2, z3, z4) + 3 * sqrt(max(s0, s1, s2, s3, s4)), length.out = 10000)
+
+plt_cond = data.frame(x = rep(x, 5 * 4), 
+                      y = c(dnorm(x, z0[1], sqrt(s0)), 
+                            dnorm(x, z1[1], sqrt(s1)), 
+                            dnorm(x, z2[1], sqrt(s2)), 
+                            dnorm(x, z3[1], sqrt(s3)), 
+                            dnorm(x, z4[1], sqrt(s4)),
+                            dnorm(x, z0[2], sqrt(s0)), 
+                            dnorm(x, z1[2], sqrt(s1)), 
+                            dnorm(x, z2[2], sqrt(s2)), 
+                            dnorm(x, z3[2], sqrt(s3)), 
+                            dnorm(x, z4[2], sqrt(s4)),
+                            dnorm(x, z0[3], sqrt(s0)), 
+                            dnorm(x, z1[3], sqrt(s1)), 
+                            dnorm(x, z2[3], sqrt(s2)), 
+                            dnorm(x, z3[3], sqrt(s3)), 
+                            dnorm(x, z4[3], sqrt(s4)),
+                            dnorm(x, z0[4], sqrt(s0)), 
+                            dnorm(x, z1[4], sqrt(s1)), 
+                            dnorm(x, z2[4], sqrt(s2)), 
+                            dnorm(x, z3[4], sqrt(s3)), 
+                            dnorm(x, z4[4], sqrt(s4))),
+                      cond = rep(c("Hard(Outdoor)", "Hard(Indoor)", "Clay", "Grass"), each = 5*length(x)),
+                      Player = rep(rep(c("Other", "Federer", "Nadal", "Djokovic", "Murray"), 
+                                       each = length(x)), 4))
+plt_cond$cond = factor(plt_cond$cond, levels = c("Hard(Outdoor)", "Hard(Indoor)", "Clay", "Grass"))
+plt_cond$Player = factor(plt_cond$Player, levels = c("Federer", "Nadal", "Djokovic", "Murray", "Other"))
+
+ggplot(plt_cond, aes(x = x, y = y, color = Player))+
+  geom_line()+
+  theme_bw()+
+  facet_wrap(~cond)+
+  labs(x = "Performance level", y = "density", 
+       title = "Performance on Different Tennis Courts in a Grand Slam Final")
+```
+
+From the plots, we again see that the performance level of the *Big 4* is considerably higher than the "Other" players. We also see that *Djokovic* is the highest performing player on hard courts (both indoor and outdoor), with *Federer* being the second best player on hard courts. *Nadal* dominates clay court matches and *Federer* shares the crown of the best grass court player with *Djokovic*. Something worth noting is that the differences in clay court performance is much higher than those of other surfaces. This is consistant with the general perception of the clay court being more distinct in the challenges it brings to players. 
+
+Our model allows us to estimate probabilities of winning in different situations. Table 2 shows the win probability of *Big 4* and "Other" against each other. The results confirm with the plots above.
+
+```{r, eval=TRUE}
+win_df = rbind(pnorm(z1 - z2, 0, sqrt(s1 + s2)),
+               pnorm(z1 - z3, 0, sqrt(s1 + s3)),
+               pnorm(z1 - z4, 0, sqrt(s1 + s4)),
+               pnorm(z1 - z0, 0, sqrt(s1 + s0)),
+               pnorm(z2 - z1, 0, sqrt(s2 + s1)),
+               pnorm(z2 - z3, 0, sqrt(s2 + s3)),
+               pnorm(z2 - z4, 0, sqrt(s2 + s4)),
+               pnorm(z2 - z0, 0, sqrt(s2 + s0)),
+               pnorm(z3 - z1, 0, sqrt(s3 + s1)),
+               pnorm(z3 - z2, 0, sqrt(s3 + s2)),
+               pnorm(z3 - z4, 0, sqrt(s3 + s4)),
+               pnorm(z3 - z0, 0, sqrt(s3 + s0)),
+               pnorm(z4 - z1, 0, sqrt(s4 + s1)),
+               pnorm(z4 - z2, 0, sqrt(s4 + s2)),
+               pnorm(z4 - z3, 0, sqrt(s4 + s3)),
+               pnorm(z4 - z0, 0, sqrt(s4 + s0)))
+colnames(win_df) = c("Hard(Outdoor)", "Hard(Indoor)", "Clay", "Grass")
+rownames(win_df) = c("Nadal", "Djokovic", "Murray", "Other", 
+                     "Federer", "Djokovic", "Murray", "Other",
+                     "Federer", "Nadal", "Murray", "Other",
+                     "Federer", "Nadal", "Djokovic", "Other")
+
+kable(win_df, "latex", booktabs = T, digits = 2, 
+      caption = "Estimated win Probability in Grand Slam Finals") %>%
+  kableExtra::kable_styling(font_size = 7, latex_options = "hold_position") %>%
+  kableExtra::group_rows("Federer", 1, 4, latex_gap_space = "0em") %>%
+  kableExtra::group_rows("Nadal", 5, 8, latex_gap_space = "1em") %>%
+  kableExtra::group_rows("Djokovic", 9, 12, latex_gap_space = "1em") %>%
+  kableExtra::group_rows("Murray", 13, 16, latex_gap_space = "1em")
+```
+
+Next we will look into some hypothetical scenarios. As previously mentioned, the proportion of each surface is unequal on the ATP tour. The current tour consists of around 60% hard court, 30% clay, and 10% grass court tournaments. Obviously, players who prefer hard courts are more likely to gain more points and in turn get a higher ranking. We have also argued that the hard courts and grass courts are more similar in nature and clay courts requires players use different strategies. We propose two hypothetical scenarios, equal surface proportions (17% indoor hard, 17% outdoor hard, 33% clay, 33% grass) and half clay (50% clay, 25% grass, 12.5% indoor hard, 12.5% outdoor hard). The estimated overall win percentage of Grand Slam finals in these two scenarios are recalculated for the *Big 4*, as shown in table 3 below.
+
+```{r different proportion of surfaces, eval=TRUE}
+prop1 = c(0.17, 0.17, 0.33, 0.33)
+prop1_df = rbind(c(NA, sum(pnorm(z1 - z2, 0, sqrt(s1 + s2)) * prop1), 
+                   sum(pnorm(z1 - z3, 0, sqrt(s1 + s3)) * prop1),
+                   sum(pnorm(z1 - z4, 0, sqrt(s1 + s4)) * prop1)),
+                 c(sum(pnorm(z2 - z1, 0, sqrt(s2 + s1)) * prop1), NA, 
+                   sum(pnorm(z2 - z3, 0, sqrt(s2 + s3)) * prop1),
+                   sum(pnorm(z2 - z4, 0, sqrt(s2 + s4)) * prop1)),
+                 c(sum(pnorm(z3 - z1, 0, sqrt(s3 + s1)) * prop1), 
+                   sum(pnorm(z3 - z2, 0, sqrt(s3 + s2)) * prop1), NA, 
+                   sum(pnorm(z3 - z4, 0, sqrt(s3 + s4)) * prop1)),
+                 c(sum(pnorm(z4 - z1, 0, sqrt(s4 + s1)) * prop1), 
+                   sum(pnorm(z4 - z2, 0, sqrt(s4 + s2)) * prop1),
+                   sum(pnorm(z4 - z3, 0, sqrt(s4 + s3)) * prop1), NA))
+
+colnames(prop1_df) = c("Federer", "Nadal", "Djokovic", "Murray")
+rownames(prop1_df) = c("Federer", "Nadal", "Djokovic", "Murray")
+
+prop2 = c(0.125, 0.125, 0.50, 0.25)
+prop2_df = rbind(c(NA, sum(pnorm(z1 - z2, 0, sqrt(s1 + s2)) * prop2), 
+                   sum(pnorm(z1 - z3, 0, sqrt(s1 + s3)) * prop2),
+                   sum(pnorm(z1 - z4, 0, sqrt(s1 + s4)) * prop2)),
+                 c(sum(pnorm(z2 - z1, 0, sqrt(s2 + s1)) * prop2), NA, 
+                   sum(pnorm(z2 - z3, 0, sqrt(s2 + s3)) * prop2),
+                   sum(pnorm(z2 - z4, 0, sqrt(s2 + s4)) * prop2)),
+                 c(sum(pnorm(z3 - z1, 0, sqrt(s3 + s1)) * prop2), 
+                   sum(pnorm(z3 - z2, 0, sqrt(s3 + s2)) * prop2), NA, 
+                   sum(pnorm(z3 - z4, 0, sqrt(s3 + s4)) * prop2)),
+                 c(sum(pnorm(z4 - z1, 0, sqrt(s4 + s1)) * prop2), 
+                   sum(pnorm(z4 - z2, 0, sqrt(s4 + s2)) * prop2),
+                   sum(pnorm(z4 - z3, 0, sqrt(s4 + s3)) * prop2), NA))
+
+colnames(prop2_df) = c("Federer", "Nadal", "Djokovic", "Murray")
+rownames(prop2_df) = c("Federer", "Nadal", "Djokovic", "Murray")
+
+prop_df = rbind(prop1_df, prop2_df)
+kable(prop_df, "latex", booktabs = T, digits = 2, 
+      caption = "Estimated win Probability in hypothetical scenarios") %>%
+  kableExtra::add_header_above(c(" ", "Against" = 4)) %>%
+  kableExtra::kable_styling(font_size = 7, latex_options = "hold_position") %>%
+  kableExtra::group_rows("Equal surface proportion", 1, 4, latex_gap_space = "0em") %>%
+  kableExtra::group_rows("Half clay", 5, 8, latex_gap_space = "1em")
+```
+
+In these two hypothetical scenarios, *Murray* have a win percentage lower than 50% against all the other three, while *Djokovic* will have an advantage over the others. Moreover, *Federer* and *Nadal* would have no overall advantage over one another if the ATP tour has equal surface proportions. Due to the gap between *Federer* and *Nadal*'s clay court performance levels, *Nadal* will gain an upperhand if the proportion of clay courts is increased. Analyses on these hypothetical scenarios suggests that *Djokovic* is the overall strongest player of the four, while *Murray* is the weakest in general.
+
+## Conclusions
+We developed a method to quantify performance levels of professional men's tennis players by using a Bayesian graphical model. Results from our model shows that performance levels of players are skewed, with a few top players above others. We further identified that the players with top performance levels are indeed the *Big 4* of men's professional tennis. By plotting the posterior predictive distributions and calculating the win probability, we showed that members of the *Big 4* each has particular surfaces that they excel on, while *Djokovic* would be the overall strongest player if the proportion of surfaces is equal.
+
+Potential future work might involve adding a time component to the model, either by including an age term or directly letting the current performance level be dependent on the performance level of previous matches. This would account for the change in performance level over the years and would enable the model to assess performance level more accuratly at a particular given time. Another topic for future work is putting better priors on players, especially for those without sufficient data. Priors can be formulated using intuition or other factors such as service speed and ball spinrate that a player can produce.
+
+## References
+\begin{hangparas}{.25in}{1}
+Shang-Min Ma, Chao-Chin Liu, Yue Tan \& Shang-Chun Ma (2013). Winning matches in Grand Slam men's singles: An analysis of player performance-related variables from 1991 to 2008, Journal of Sports Sciences, 31:11, 1147-1155
+
+Asmita Chitnis, Omkarprasad Vaidya (2014). Performance Assessment of Tennis Players: Application of DEA, Procedia - Social and Behavioral Sciences 133, 74-83
+
+Filipcic, Ales; Zecic, Miroslav; Reid, Machar; Crespo, Miguel; Panjan, Andrej; Nejc, Sarabon (2015). Differences in Performance Indicators of Elite Tennis Players in the Period 1991-2010, Journal of Physical Education and Sport 15(4), 671-677
+\end{hangparas}
